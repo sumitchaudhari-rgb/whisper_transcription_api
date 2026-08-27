@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: whisper-transcription-api
+    runtime: docker
+    plan: starter
+    region: oregon
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: WHISPER_MODEL
+        value: base
+      - key: WHISPER_DEVICE
+        value: cpu
+      - key: WHISPER_COMPUTE_TYPE
+        value: int8
+      - key: API_KEY
+        sync: false
