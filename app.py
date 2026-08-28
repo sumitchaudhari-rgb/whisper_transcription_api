@@ -1,8 +1,11 @@
 import os
 import shutil
 import tempfile
+import time
+import threading
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from fastapi import FastAPI, File, UploadFile, Form, Header, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -15,8 +18,61 @@ WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 CONFIGURED_API_KEY = os.getenv("API_KEY", "").strip()
 
+# Rate limiting configuration
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "10"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+
 # Global model instance
 model: Optional[WhisperModel] = None
+
+
+class SlidingWindowRateLimiter:
+    """
+    Thread-safe in-memory sliding-window rate limiter per client key.
+    Tracks timestamp history per key without external dependencies.
+    """
+    def __init__(self, max_requests: int, window_seconds: int):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._lock = threading.Lock()
+        self._requests: Dict[str, deque] = defaultdict(deque)
+
+    def check_rate_limit(self, key: str) -> Tuple[bool, int]:
+        """
+        Check and record a request for the given key.
+        Returns:
+            (is_limited: bool, retry_after_seconds: int)
+        """
+        if self.max_requests <= 0:
+            return False, 0
+
+        now = time.time()
+        with self._lock:
+            timestamps = self._requests[key]
+            cutoff = now - self.window_seconds
+
+            # Evict timestamps older than the active window
+            while timestamps and timestamps[0] <= cutoff:
+                timestamps.popleft()
+
+            if len(timestamps) >= self.max_requests:
+                oldest_timestamp = timestamps[0]
+                retry_after = max(1, int(oldest_timestamp + self.window_seconds - now + 0.999))
+                return True, retry_after
+
+            timestamps.append(now)
+            return False, 0
+
+    def reset(self):
+        """Reset all tracked rate limit buckets."""
+        with self._lock:
+            self._requests.clear()
+
+
+rate_limiter = SlidingWindowRateLimiter(
+    max_requests=RATE_LIMIT_REQUESTS,
+    window_seconds=RATE_LIMIT_WINDOW_SECONDS
+)
 
 
 @asynccontextmanager
@@ -35,41 +91,51 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Whisper Transcription API",
-    description="FastAPI service for audio transcription using faster-whisper on CPU.",
+    description="FastAPI service for audio transcription using faster-whisper on CPU with rate limiting.",
     version="1.0.0",
     lifespan=lifespan
 )
 
 
-def verify_auth(api_key: Optional[str], authorization: Optional[str], x_api_key: Optional[str]):
-    """Validate API key if CONFIGURED_API_KEY is defined."""
-    if not CONFIGURED_API_KEY:
-        return  # No authentication required
-    
+def extract_and_verify_auth(api_key: Optional[str], authorization: Optional[str], x_api_key: Optional[str]) -> str:
+    """
+    Validate API key if CONFIGURED_API_KEY is defined.
+    Returns the key identifier to use for rate limiting.
+    """
     token = None
     if api_key:
-        token = api_key
+        token = api_key.strip()
     elif x_api_key:
-        token = x_api_key
+        token = x_api_key.strip()
     elif authorization and authorization.startswith("Bearer "):
         token = authorization.split("Bearer ", 1)[1].strip()
 
-    if token != CONFIGURED_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key."
-        )
+    if CONFIGURED_API_KEY:
+        if token != CONFIGURED_API_KEY:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing API key."
+            )
+        return token
+    else:
+        # If API_KEY is unset on the server, auth is disabled.
+        # Group unauthenticated requests under a shared bucket, or track by supplied key if present.
+        return token if token else "__anonymous__"
 
 
 @app.get("/", tags=["Health"])
 def health_check():
-    """Health check endpoint to verify service and model availability."""
+    """Health check endpoint to verify service, model availability, and rate limiting config."""
     return {
         "status": "ok",
         "model": WHISPER_MODEL,
         "device": WHISPER_DEVICE,
         "compute_type": WHISPER_COMPUTE_TYPE,
         "auth_enabled": bool(CONFIGURED_API_KEY),
+        "rate_limit": {
+            "max_requests": RATE_LIMIT_REQUESTS,
+            "window_seconds": RATE_LIMIT_WINDOW_SECONDS
+        },
         "model_loaded": model is not None
     }
 
@@ -87,10 +153,22 @@ def transcribe(
     """
     Transcribe an uploaded audio file.
     Runs in thread pool to prevent blocking ASGI event loop.
+    Enforces authentication followed by sliding-window rate limiting per API key.
     Returns detected language, language probability, duration, full transcript, and segment timestamps.
     """
-    verify_auth(api_key, authorization, x_api_key)
+    # 1. Validate Authentication (401 if invalid)
+    client_key = extract_and_verify_auth(api_key, authorization, x_api_key)
 
+    # 2. Check Rate Limit (429 if limit exceeded)
+    is_limited, retry_after = rate_limiter.check_rate_limit(client_key)
+    if is_limited:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Maximum {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW_SECONDS} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    # 3. Ensure Whisper model is ready
     if model is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

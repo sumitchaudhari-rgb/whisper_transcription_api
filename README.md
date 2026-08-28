@@ -70,8 +70,25 @@ Accepts `multipart/form-data` with an audio file.
 | `WHISPER_MODEL` | `base` | Model size: `tiny`, `base`, `small`, `medium`, `large-v3` |
 | `WHISPER_DEVICE` | `cpu` | Processing device: `cpu` or `cuda` |
 | `WHISPER_COMPUTE_TYPE` | `int8` | Compute precision: `int8`, `float16`, `float32` |
+| `RATE_LIMIT_REQUESTS` | `10` | Maximum allowed requests per window |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window duration in seconds |
 | `API_KEY` | `""` *(empty)* | Optional secret key for securing endpoints |
 | `PORT` | `8000` | HTTP port (configured automatically by Render) |
+
+---
+
+## Rate Limiting
+
+The service implements an in-memory sliding-window rate limiter:
+- **Per-API Key Isolation**: Each authenticated API key has its own dedicated rate-limit bucket.
+- **Shared Anonymous Bucket**: If `API_KEY` is not set (unauthenticated mode), all anonymous requests share a single rate-limit bucket to prevent server overload.
+- **Order of Operations**: API key validation runs first (returning `401 Unauthorized` for invalid credentials), followed by the rate limit check.
+- **HTTP 429 & Retry-After**: Exceeding the rate limit returns `HTTP 429 Too Many Requests` with a JSON error payload and a `Retry-After: <seconds>` header indicating when the client can retry.
+
+### Rate Limit Configuration
+Set these environment variables in your deployment or `.env`:
+- `RATE_LIMIT_REQUESTS`: Number of requests allowed per window (default: `10`).
+- `RATE_LIMIT_WINDOW_SECONDS`: Sliding window duration in seconds (default: `60`).
 
 ---
 

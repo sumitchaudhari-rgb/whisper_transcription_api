@@ -13,5 +13,9 @@ services:
         value: cpu
       - key: WHISPER_COMPUTE_TYPE
         value: int8
+      - key: RATE_LIMIT_REQUESTS
+        value: "10"
+      - key: RATE_LIMIT_WINDOW_SECONDS
+        value: "60"
       - key: API_KEY
         sync: false
