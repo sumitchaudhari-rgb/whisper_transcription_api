@@ -62,7 +62,7 @@ def verify_auth(api_key: Optional[str], authorization: Optional[str], x_api_key:
 
 
 @app.get("/", tags=["Health"])
-async def health_check():
+def health_check():
     """Health check endpoint to verify service and model availability."""
     return {
         "status": "ok",
@@ -75,15 +75,18 @@ async def health_check():
 
 
 @app.post("/transcribe", tags=["Transcription"])
-async def transcribe(
+def transcribe(
     file: UploadFile = File(..., description="Audio file to transcribe (e.g. mp3, wav, m4a, ogg)"),
-    language: Optional[str] = Form(None, description="Optional ISO-639-1 language code (e.g. 'en', 'es', 'fr')"),
+    language: Optional[str] = Form(None, description="Optional ISO-639-1 language code (e.g. 'en', 'hi', 'es')"),
+    beam_size: int = Form(1, description="Beam size for decoding (1=greedy fastest for CPU, 5=high accuracy)"),
+    vad_filter: bool = Form(True, description="Enable Voice Activity Detection to filter music/silence"),
     api_key: Optional[str] = Form(None, description="Optional API key via form field"),
     authorization: Optional[str] = Header(None, description="Optional Bearer token"),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key", description="Optional API key header")
 ):
     """
     Transcribe an uploaded audio file.
+    Runs in thread pool to prevent blocking ASGI event loop.
     Returns detected language, language probability, duration, full transcript, and segment timestamps.
     """
     verify_auth(api_key, authorization, x_api_key)
@@ -104,20 +107,23 @@ async def transcribe(
         segments, info = model.transcribe(
             tmp_path,
             language=language if language else None,
-            beam_size=5
+            beam_size=beam_size,
+            vad_filter=vad_filter
         )
 
         segment_list: List[Dict[str, Any]] = []
         transcript_parts: List[str] = []
 
         for segment in segments:
-            transcript_parts.append(segment.text.strip())
-            segment_list.append({
-                "id": segment.id,
-                "start": round(segment.start, 2),
-                "end": round(segment.end, 2),
-                "text": segment.text.strip()
-            })
+            text = segment.text.strip()
+            if text:
+                transcript_parts.append(text)
+                segment_list.append({
+                    "id": segment.id,
+                    "start": round(segment.start, 2),
+                    "end": round(segment.end, 2),
+                    "text": text
+                })
 
         full_text = " ".join(transcript_parts).strip()
 
