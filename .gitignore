@@ -27,7 +27,6 @@ transcribe_*.py
 audit_*.py
 download_*.py
 *.log
-antigravity_whisper_render_prompts.md
 
 # Environment variables & secrets
 .env
