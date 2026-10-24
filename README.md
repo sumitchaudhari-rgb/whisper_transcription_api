@@ -46,7 +46,7 @@ Accepts `multipart/form-data` with an audio file.
 **Response:**
 ```json
 {
-  "text": "Antigravity Whisper transcription test.",
+  "text": "Whisper transcription test.",
   "language": "en",
   "language_probability": 0.9984,
   "duration": 2.5,
@@ -55,7 +55,7 @@ Accepts `multipart/form-data` with an audio file.
       "id": 1,
       "start": 0.0,
       "end": 2.5,
-      "text": "Antigravity Whisper transcription test."
+      "text": "Whisper transcription test."
     }
   ]
 }
